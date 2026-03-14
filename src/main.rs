@@ -1,17 +1,39 @@
-use winit::{application::ApplicationHandler, event_loop::EventLoop, window::Window};
+use std::sync::Arc;
+use winit::{
+    application::ApplicationHandler,
+    event::WindowEvent,
+    event_loop::{ActiveEventLoop, EventLoop},
+    window::Window,
+};
 
 #[derive(Default)]
-struct App {
-    window: Option<Window>,
+pub struct App {
+    state: Option<State>,
+}
+pub struct State {
+    window: Arc<Window>,
+}
+
+impl State {
+    pub async fn new(window: Arc<Window>) -> anyhow::Result<Self> {
+        Ok(Self { window })
+    }
+
+    pub fn resize(&mut self, _width: u32, _height: u32) {}
+
+    pub fn render(&mut self) {
+        self.window.request_redraw();
+    }
 }
 
 impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
-        self.window = Some(
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        let window = Arc::new(
             event_loop
                 .create_window(Window::default_attributes().with_title("Kaiser db"))
                 .unwrap(),
-        )
+        );
+        self.state = Some(pollster::block_on(State::new(window)).unwrap());
     }
 
     fn window_event(
@@ -20,6 +42,17 @@ impl ApplicationHandler for App {
         window_id: winit::window::WindowId,
         event: winit::event::WindowEvent,
     ) {
+        let state = match &mut self.state {
+            Some(s) => s,
+            None => return,
+        };
+
+        match event {
+            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::Resized(size) => state.resize(size.width, size.height),
+            WindowEvent::RedrawRequested => state.render(),
+            _ => {}
+        }
     }
 }
 
