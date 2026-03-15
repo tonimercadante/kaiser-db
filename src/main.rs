@@ -28,12 +28,19 @@ pub struct State {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
 
+    // Text glyphon stuff
     font_system: FontSystem,
     swash_cache: SwashCache,
     viewport: Viewport,
     atlas: glyphon::TextAtlas,
     text_renderer: glyphon::TextRenderer,
     text_buffer: glyphon::Buffer,
+
+    // Shaders stuff
+    render_pipeline: wgpu::RenderPipeline,
+
+    // UI stuff
+    query: String,
 
     // window has to be last because a bug or something
     window: Arc<Window>,
@@ -61,7 +68,7 @@ impl State {
             .ok_or(anyhow::anyhow!("no surface config"))?;
         surface.configure(&device, &config);
 
-        // TExt stuff
+        // TExt glyphon stuff
         let mut font_system = FontSystem::new();
         let swash_cache = SwashCache::new();
         let cache = Cache::new(&device);
@@ -76,14 +83,49 @@ impl State {
             Some(size.width as f32),
             Some(size.height as f32),
         );
+
+        let query = String::from("KAISER DB FINALLY, MAGNUS!");
+
         text_buffer.set_text(
             &mut font_system,
-            "KAISER DB FINALLY, MAGNUS!",
+            &query,
             &Attrs::new().family(Family::SansSerif),
             Shaping::Advanced,
             None,
         );
         text_buffer.shape_until_scroll(&mut font_system, false);
+
+        // Shader stuff
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders.wgsl").into()),
+        });
+
+        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: None,
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multiview_mask: None,
+            multisample: wgpu::MultisampleState::default(),
+            cache: None,
+        });
 
         Ok(Self {
             surface,
@@ -97,6 +139,12 @@ impl State {
             atlas,
             text_renderer,
             text_buffer,
+
+            // Shader stuff
+            render_pipeline,
+
+            // UI stuff
+            query,
 
             window,
         })
@@ -170,6 +218,10 @@ impl State {
                 })],
                 ..Default::default()
             });
+
+            pass.set_pipeline(&self.render_pipeline);
+            pass.draw(0..3, 0..1);
+
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
                 .unwrap();
@@ -209,18 +261,30 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => state.render(),
             WindowEvent::KeyboardInput { event, .. } => {
                 println!("{event:?}");
-
                 if event.state == winit::event::ElementState::Pressed {
-                    if let winit::keyboard::Key::Character(c) = event.logical_key {
-                        state.text_buffer.set_text(
-                            &mut state.font_system,
-                            &c,
-                            &Attrs::new().family(Family::SansSerif),
-                            Shaping::Advanced,
-                            None,
-                        );
-                        state.window.request_redraw();
+                    match event.logical_key {
+                        winit::keyboard::Key::Character(c) => {
+                            state.query.push_str(&c);
+                        }
+                        winit::keyboard::Key::Named(winit::keyboard::NamedKey::Space) => {
+                            state.query.push(' ');
+                        }
+                        winit::keyboard::Key::Named(winit::keyboard::NamedKey::Backspace) => {
+                            state.query.pop();
+                        }
+                        winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter) => {
+                            state.query.push('\n');
+                        }
+                        _ => {}
                     }
+                    state.text_buffer.set_text(
+                        &mut state.font_system,
+                        &state.query,
+                        &Attrs::new().family(Family::SansSerif),
+                        Shaping::Advanced,
+                        None,
+                    );
+                    state.window.request_redraw();
                 }
             }
             _ => {}
