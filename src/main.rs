@@ -66,6 +66,7 @@ impl State {
         let config = surface
             .get_default_config(&adapter, size.width, size.height)
             .ok_or(anyhow::anyhow!("no surface config"))?;
+
         surface.configure(&device, &config);
 
         // TExt glyphon stuff
@@ -155,11 +156,27 @@ impl State {
             self.config.width = width;
             self.config.height = height;
             self.surface.configure(&self.device, &self.config);
+            self.text_buffer.set_size(
+                &mut self.font_system,
+                Some(width as f32),
+                Some(height as f32),
+            );
+            self.text_buffer
+                .shape_until_scroll(&mut self.font_system, false);
         }
     }
 
     pub fn render(&mut self) {
-        let frame = self.surface.get_current_texture().unwrap();
+        let frame = match self.surface.get_current_texture() {
+            Ok(frame) => frame,
+            Err(wgpu::SurfaceError::Outdated) | Err(wgpu::SurfaceError::Lost) => {
+                self.surface.configure(&self.device, &self.config);
+                self.window.request_redraw();
+                return;
+            }
+            Err(e) => panic!("Surface error: {e}"),
+        };
+
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -220,7 +237,7 @@ impl State {
             });
 
             pass.set_pipeline(&self.render_pipeline);
-            pass.draw(0..3, 0..1);
+            pass.draw(0..6, 0..1);
 
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
@@ -229,7 +246,7 @@ impl State {
 
         self.queue.submit([encoder.finish()]);
         frame.present();
-        self.window.request_redraw();
+        self.atlas.trim();
     }
 }
 
@@ -257,7 +274,10 @@ impl ApplicationHandler for App {
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(size) => state.resize(size.width, size.height),
+            WindowEvent::Resized(size) => {
+                state.resize(size.width, size.height);
+                state.render();
+            }
             WindowEvent::RedrawRequested => state.render(),
             WindowEvent::KeyboardInput { event, .. } => {
                 println!("{event:?}");
@@ -286,6 +306,13 @@ impl ApplicationHandler for App {
                     );
                     state.window.request_redraw();
                 }
+            }
+            WindowEvent::ScaleFactorChanged {
+                inner_size_writer, ..
+            } => {
+                let new_size = state.window.inner_size();
+                state.resize(new_size.width, new_size.height);
+                state.window.request_redraw();
             }
             _ => {}
         }
