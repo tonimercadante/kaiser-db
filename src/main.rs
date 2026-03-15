@@ -11,6 +11,11 @@ pub struct App {
     state: Option<State>,
 }
 pub struct State {
+    surface: wgpu::Surface<'static>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    config: wgpu::SurfaceConfiguration,
+    is_surface_configured: bool,
     window: Arc<Window>,
 }
 
