@@ -1,6 +1,16 @@
+use glyphon::{
+    Attrs, Buffer, Cache, Color, Family, Font, FontSystem, Metrics, Resolution, Shaping,
+    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+};
+use wgpu::{
+    CommandEncoderDescriptor, CompositeAlphaMode, DeviceDescriptor, Instance, InstanceDescriptor,
+    LoadOp, MultisampleState, Operations, PresentMode, RenderPassColorAttachment,
+    RenderPassDescriptor, RequestAdapterOptions, SurfaceConfiguration, TextureFormat,
+    TextureUsages, TextureViewDescriptor,
+};
+
 use glyphon::cosmic_text::skrifa::instance;
 use std::sync::Arc;
-use wgpu::DeviceDescriptor;
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -17,6 +27,15 @@ pub struct State {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+
+    font_system: FontSystem,
+    swash_cache: SwashCache,
+    viewport: Viewport,
+    atlas: glyphon::TextAtlas,
+    text_renderer: glyphon::TextRenderer,
+    text_buffer: glyphon::Buffer,
+
+    // window has to be last because a bug or something
     window: Arc<Window>,
 }
 
@@ -42,12 +61,44 @@ impl State {
             .ok_or(anyhow::anyhow!("no surface config"))?;
         surface.configure(&device, &config);
 
+        // TExt stuff
+        let mut font_system = FontSystem::new();
+        let swash_cache = SwashCache::new();
+        let cache = Cache::new(&device);
+        let viewport = Viewport::new(&device, &cache);
+        let mut atlas = TextAtlas::new(&device, &queue, &cache, config.format);
+        let text_renderer =
+            TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
+
+        let mut text_buffer = Buffer::new(&mut font_system, Metrics::new(30.0, 42.0));
+        text_buffer.set_size(
+            &mut font_system,
+            Some(size.width as f32),
+            Some(size.height as f32),
+        );
+        text_buffer.set_text(
+            &mut font_system,
+            "KAISER DB FINALLY, MAGNUS!",
+            &Attrs::new().family(Family::SansSerif),
+            Shaping::Advanced,
+            None,
+        );
+        text_buffer.shape_until_scroll(&mut font_system, false);
+
         Ok(Self {
-            window,
             surface,
             device,
             queue,
             config,
+
+            font_system,
+            swash_cache,
+            viewport,
+            atlas,
+            text_renderer,
+            text_buffer,
+
+            window,
         })
     }
 
@@ -69,8 +120,40 @@ impl State {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
 
+        self.viewport.update(
+            &self.queue,
+            Resolution {
+                width: self.config.width,
+                height: self.config.height,
+            },
+        );
+        self.text_renderer
+            .prepare(
+                &self.device,
+                &self.queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.viewport,
+                [TextArea {
+                    buffer: &self.text_buffer,
+                    left: 20.0,
+                    top: 20.0,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: 0,
+                        top: 0,
+                        right: self.config.width as i32,
+                        bottom: self.config.height as i32,
+                    },
+                    default_color: Color::rgb(255, 255, 255),
+                    custom_glyphs: &[],
+                }],
+                &mut self.swash_cache,
+            )
+            .unwrap();
+
         {
-            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
@@ -87,7 +170,10 @@ impl State {
                 })],
                 ..Default::default()
             });
-        } // _pass is dropped here, render pass ends
+            self.text_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)
+                .unwrap();
+        }
 
         self.queue.submit([encoder.finish()]);
         frame.present();
@@ -121,11 +207,22 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => state.resize(size.width, size.height),
             WindowEvent::RedrawRequested => state.render(),
-            WindowEvent::KeyboardInput {
-                device_id,
-                event,
-                is_synthetic,
-            } => println!("{event:?}"),
+            WindowEvent::KeyboardInput { event, .. } => {
+                println!("{event:?}");
+
+                if event.state == winit::event::ElementState::Pressed {
+                    if let winit::keyboard::Key::Character(c) = event.logical_key {
+                        state.text_buffer.set_text(
+                            &mut state.font_system,
+                            &c,
+                            &Attrs::new().family(Family::SansSerif),
+                            Shaping::Advanced,
+                            None,
+                        );
+                        state.window.request_redraw();
+                    }
+                }
+            }
             _ => {}
         }
     }
