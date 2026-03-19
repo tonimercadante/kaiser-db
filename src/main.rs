@@ -1,22 +1,56 @@
+use glyphon::cosmic_text::skrifa::instance;
 use glyphon::{
     Attrs, Buffer, Cache, Color, Family, Font, FontSystem, Metrics, Resolution, Shaping,
     SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
+use std::sync::Arc;
+use wgpu::util::DeviceExt;
 use wgpu::{
     CommandEncoderDescriptor, CompositeAlphaMode, DeviceDescriptor, Instance, InstanceDescriptor,
     LoadOp, MultisampleState, Operations, PresentMode, RenderPassColorAttachment,
     RenderPassDescriptor, RequestAdapterOptions, SurfaceConfiguration, TextureFormat,
     TextureUsages, TextureViewDescriptor,
 };
-
-use glyphon::cosmic_text::skrifa::instance;
-use std::sync::Arc;
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
     event_loop::{ActiveEventLoop, EventLoop},
     window::Window,
 };
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct RectInstance {
+    position: [f32; 2],
+    size: [f32; 2],
+    color: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct Globals {
+    resolution: [f32; 2],
+    _pad: [f32; 2],
+}
+
+fn build_rects(w: f32, h: f32) -> Vec<RectInstance> {
+    let rect_height = (h - 60.0) / 2.0; // split remaining space equally
+
+    vec![
+        // query bar
+        RectInstance {
+            position: [20.0, 20.0],
+            size: [w - 40.0, rect_height],
+            color: [0.15, 0.15, 0.15, 1.0],
+        },
+        // results panel
+        RectInstance {
+            position: [20.0, 30.0 + rect_height],
+            size: [w - 40.0, rect_height],
+            color: [0.1, 0.1, 0.1, 1.0],
+        },
+    ]
+}
 
 #[derive(Default)]
 pub struct App {
@@ -37,7 +71,10 @@ pub struct State {
     text_buffer: glyphon::Buffer,
 
     // Shaders stuff
-    render_pipeline: wgpu::RenderPipeline,
+    globals_buffer: wgpu::Buffer,
+    globals_bind_group: wgpu::BindGroup,
+    rect_buffer: wgpu::Buffer,
+    rect_pipeline: wgpu::RenderPipeline,
 
     // UI stuff
     query: String,
@@ -97,18 +134,72 @@ impl State {
         text_buffer.shape_until_scroll(&mut font_system, false);
 
         // Shader stuff
+        //  // Globals uniform
+        let globals = Globals {
+            resolution: [size.width as f32, size.height as f32],
+            _pad: [0.0; 2],
+        };
+        let globals_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("globals"),
+            contents: bytemuck::cast_slice(&[globals]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let globals_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
+        let globals_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &globals_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: globals_buffer.as_entire_binding(),
+            }],
+        });
+
+        // Rect buffer
+        let rects = build_rects(size.width as f32, size.height as f32);
+        let rect_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("rects"),
+            contents: bytemuck::cast_slice(&rects),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders.wgsl").into()),
         });
 
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
-            layout: None,
+            bind_group_layouts: &[&globals_bgl],
+            immediate_size: 0,
+        });
+
+        let rect_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: None,
+            layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[],
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<RectInstance>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x2,
+                        1 => Float32x2,
+                        2 => Float32x4,
+                    ],
+                }],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -116,7 +207,7 @@ impl State {
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: Default::default(),
@@ -142,7 +233,10 @@ impl State {
             text_buffer,
 
             // Shader stuff
-            render_pipeline,
+            rect_pipeline,
+            globals_buffer,
+            globals_bind_group,
+            rect_buffer,
 
             // UI stuff
             query,
@@ -201,14 +295,14 @@ impl State {
                 &self.viewport,
                 [TextArea {
                     buffer: &self.text_buffer,
-                    left: 20.0,
-                    top: 20.0,
+                    left: 28.0,
+                    top: 28.0,
                     scale: 1.0,
                     bounds: TextBounds {
-                        left: 0,
-                        top: 0,
-                        right: self.config.width as i32,
-                        bottom: self.config.height as i32,
+                        left: 20,
+                        top: 20,
+                        right: (self.config.width as i32) - 20,
+                        bottom: 20 + ((self.config.height as f32 - 60.0) / 2.0) as i32,
                     },
                     default_color: Color::rgb(255, 255, 255),
                     custom_glyphs: &[],
@@ -236,8 +330,10 @@ impl State {
                 ..Default::default()
             });
 
-            pass.set_pipeline(&self.render_pipeline);
-            pass.draw(0..6, 0..1);
+            pass.set_pipeline(&self.rect_pipeline);
+            pass.set_bind_group(0, &self.globals_bind_group, &[]);
+            pass.set_vertex_buffer(0, self.rect_buffer.slice(..));
+            pass.draw(0..6, 0..2);
 
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
