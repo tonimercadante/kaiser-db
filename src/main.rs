@@ -34,22 +34,48 @@ struct Globals {
 }
 
 fn build_rects(w: f32, h: f32) -> Vec<RectInstance> {
-    let rect_height = (h - 60.0) / 2.0; // split remaining space equally
-
-    vec![
+    let rect_height = (h - 60.0) / 2.0;
+    let mut rects = vec![
         // query bar
         RectInstance {
             position: [20.0, 20.0],
             size: [w - 40.0, rect_height],
             color: [0.15, 0.15, 0.15, 1.0],
         },
-        // results panel
+        // results panel background
         RectInstance {
             position: [20.0, 30.0 + rect_height],
             size: [w - 40.0, rect_height],
             color: [0.1, 0.1, 0.1, 1.0],
         },
-    ]
+    ];
+
+    let table_x = 20.0;
+    let table_y = 30.0 + rect_height;
+    let table_w = w - 40.0;
+    let cols = 3;
+    let rows = 5;
+    let col_width = table_w / cols as f32;
+    let row_height = 30.0;
+
+    for r in 0..rows {
+        for c in 0..cols {
+            rects.push(RectInstance {
+                position: [
+                    table_x + c as f32 * col_width,
+                    table_y + r as f32 * row_height,
+                ],
+                size: [col_width - 2.0, row_height - 2.0], // -2 for gap between cells
+                color: if r == 0 {
+                    [0.2, 0.2, 0.2, 1.0]
+                } else {
+                    [0.12, 0.12, 0.12, 1.0]
+                },
+            });
+        }
+    }
+
+    rects
 }
 
 #[derive(Default)]
@@ -69,6 +95,7 @@ pub struct State {
     atlas: glyphon::TextAtlas,
     text_renderer: glyphon::TextRenderer,
     text_buffer: glyphon::Buffer,
+    table_buffers: Vec<glyphon::Buffer>,
 
     // Shaders stuff
     globals_buffer: wgpu::Buffer,
@@ -122,7 +149,7 @@ impl State {
             Some(size.height as f32),
         );
 
-        let query = String::from("KAISER DB FINALLY, MAGNUS!");
+        let query = String::from("SELECT *, magnus FROM kaiser;");
 
         text_buffer.set_text(
             &mut font_system,
@@ -133,6 +160,30 @@ impl State {
         );
         text_buffer.shape_until_scroll(&mut font_system, false);
 
+        let fake_data = vec![
+            vec!["id", "name", "email"],
+            vec!["1", "alice", "alice@example.com"],
+            vec!["2", "bob", "bob@example.com"],
+            vec!["3", "carol", "carol@example.com"],
+            vec!["4", "dave", "dave@example.com"],
+        ];
+
+        let mut table_buffers = vec![];
+        for row in &fake_data {
+            for cell in row {
+                let mut buf = Buffer::new(&mut font_system, Metrics::new(16.0, 20.0));
+                buf.set_size(&mut font_system, Some(200.0), Some(30.0));
+                buf.set_text(
+                    &mut font_system,
+                    cell,
+                    &Attrs::new().family(Family::Monospace),
+                    Shaping::Advanced,
+                    None,
+                );
+                buf.shape_until_scroll(&mut font_system, false);
+                table_buffers.push(buf);
+            }
+        }
         // Shader stuff
         //  // Globals uniform
         let globals = Globals {
@@ -169,11 +220,17 @@ impl State {
 
         // Rect buffer
         let rects = build_rects(size.width as f32, size.height as f32);
-        let rect_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let rect_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("rects"),
-            contents: bytemuck::cast_slice(&rects),
+            size: (std::mem::size_of::<RectInstance>() * 1024) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
+        queue.write_buffer(
+            &rect_buffer,
+            0,
+            bytemuck::cast_slice(&build_rects(size.width as f32, size.height as f32)),
+        );
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders.wgsl").into()),
@@ -231,6 +288,7 @@ impl State {
             atlas,
             text_renderer,
             text_buffer,
+            table_buffers,
 
             // Shader stuff
             rect_pipeline,
@@ -286,6 +344,57 @@ impl State {
                 height: self.config.height,
             },
         );
+        let rect_height = (self.config.height as f32 - 60.0) / 2.0;
+        let table_x = 20.0_f32;
+        let table_y = 30.0 + rect_height;
+        let table_w = self.config.width as f32 - 40.0;
+        let cols = 3_usize;
+        let row_height = 30.0_f32;
+        let col_width = table_w / cols as f32;
+
+        let mut text_areas: Vec<TextArea> = vec![
+            // query input
+            TextArea {
+                buffer: &self.text_buffer,
+                left: 28.0,
+                top: 28.0,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 20,
+                    top: 20,
+                    right: (self.config.width as i32) - 20,
+                    bottom: 20 + rect_height as i32,
+                },
+                default_color: Color::rgb(255, 255, 255),
+                custom_glyphs: &[],
+            },
+        ];
+
+        for (i, buf) in self.table_buffers.iter().enumerate() {
+            let r = i / cols;
+            let c = i % cols;
+            let x = table_x + c as f32 * col_width;
+            let y = table_y + r as f32 * row_height;
+            text_areas.push(TextArea {
+                buffer: buf,
+                left: x + 4.0,
+                top: y + 4.0,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: x as i32,
+                    top: y as i32,
+                    right: (x + col_width) as i32,
+                    bottom: (y + row_height) as i32,
+                },
+                default_color: if r == 0 {
+                    Color::rgb(180, 180, 255)
+                } else {
+                    Color::rgb(255, 255, 255)
+                },
+                custom_glyphs: &[],
+            });
+        }
+
         self.text_renderer
             .prepare(
                 &self.device,
@@ -293,20 +402,7 @@ impl State {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                [TextArea {
-                    buffer: &self.text_buffer,
-                    left: 28.0,
-                    top: 28.0,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: 20,
-                        top: 20,
-                        right: (self.config.width as i32) - 20,
-                        bottom: 20 + ((self.config.height as f32 - 60.0) / 2.0) as i32,
-                    },
-                    default_color: Color::rgb(255, 255, 255),
-                    custom_glyphs: &[],
-                }],
+                text_areas,
                 &mut self.swash_cache,
             )
             .unwrap();
@@ -333,7 +429,8 @@ impl State {
             pass.set_pipeline(&self.rect_pipeline);
             pass.set_bind_group(0, &self.globals_bind_group, &[]);
             pass.set_vertex_buffer(0, self.rect_buffer.slice(..));
-            pass.draw(0..6, 0..2);
+            let rect_count = 2 + 3 * 5; // 2 panels + 15 cells
+            pass.draw(0..6, 0..rect_count);
 
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
