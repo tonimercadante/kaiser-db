@@ -488,6 +488,9 @@ impl ApplicationHandler for App {
                         winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter) => {
                             state.query.push('\n');
                         }
+                        winit::keyboard::Key::Named(winit::keyboard::NamedKey::Super) => {
+                            println!("super")
+                        }
                         _ => {}
                     }
                     state.text_buffer.set_text(
