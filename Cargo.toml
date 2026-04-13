@@ -9,5 +9,7 @@ bytemuck = "1.25.0"
 env_logger = "0.11.9"
 glyphon = "0.10.0"
 pollster = "0.4.0"
+sqlx = { version = "0.8.6", features = ["postgres", "runtime-tokio", "chrono", "uuid", "time", "bigdecimal", "json"] }
+tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread"] }
 wgpu = "28.0.0"
 winit = "0.30.13"
